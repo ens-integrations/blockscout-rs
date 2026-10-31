@@ -49,11 +49,11 @@ mod sql_gen {
 
     #[allow(dead_code)]
     pub fn detailed_domain_select(protocol: &Protocol) -> SelectStatement {
-        domain_select_custom(protocol, DETAILED_DOMAIN_DEFAULT_SELECT_CLAUSE)
+        domain_select_custom(protocol, &detailed_domain_default_select_clause())
     }
 
     pub fn domain_select(protocol: &Protocol) -> SelectStatement {
-        domain_select_custom(protocol, DOMAIN_DEFAULT_SELECT_CLAUSE)
+        domain_select_custom(protocol, &domain_default_select_clause())
     }
 
     pub fn domain_select_custom(protocol: &Protocol, select: &str) -> SelectStatement {
@@ -68,7 +68,19 @@ mod sql_gen {
     }
 }
 
-const DETAILED_DOMAIN_DEFAULT_SELECT_CLAUSE: &str = r#"
+// ensdomains/ens-subgraph 2.x writes a sentinel to `expiry_date` for ENSv2
+// names that never expire: 253402300799 (9999-12-31T23:59:59Z) since v2.1.1,
+// 8640000000000 (13 Sep 275760, the JavaScript Date maximum) before. The
+// older value fits PostgreSQL but not chrono (max year 262142), so decoding
+// the row would panic. The sentinel and anything beyond it are reported as
+// no expiry, which the API already defines as "never expires".
+const EXPIRY_DATE_SELECT_CLAUSE: &str = r#"
+CASE WHEN expiry_date >= 253402300799 THEN NULL ELSE to_timestamp(expiry_date) END as expiry_date,
+COALESCE(expiry_date < 253402300799 AND to_timestamp(expiry_date) < now(), false) AS is_expired"#;
+
+fn detailed_domain_default_select_clause() -> String {
+    format!(
+        r#"
 vid,
 block_range,
 id,
@@ -88,12 +100,15 @@ to_timestamp(created_at) as registration_date,
 owner,
 registrant,
 wrapped_owner,
-to_timestamp(expiry_date) as expiry_date,
-COALESCE(to_timestamp(expiry_date) < now(), false) AS is_expired,
+{EXPIRY_DATE_SELECT_CLAUSE},
 token_id::text as token_id
-"#;
+"#
+    )
+}
 
-const DOMAIN_DEFAULT_SELECT_CLAUSE: &str = r#"
+fn domain_default_select_clause() -> String {
+    format!(
+        r#"
 vid,
 id,
 name,
@@ -105,9 +120,10 @@ owner,
 wrapped_owner,
 stored_offchain,
 resolved_with_wildcard,
-to_timestamp(expiry_date) as expiry_date,
-COALESCE(to_timestamp(expiry_date) < now(), false) AS is_expired
-"#;
+{EXPIRY_DATE_SELECT_CLAUSE}
+"#
+    )
+}
 
 // `block_range @>` is special sql syntax for fast filtering int4range
 // to access current version of domain.
@@ -145,10 +161,11 @@ pub async fn get_domain(
     };
     let schema = &domain_name.deployed_protocol.protocol.subgraph_schema;
     let protocol_slug = &domain_name.deployed_protocol.protocol.info.slug;
+    let detailed_select_clause = detailed_domain_default_select_clause();
     let maybe_domain = sqlx::query_as(&format!(
         r#"
         SELECT
-            {DETAILED_DOMAIN_DEFAULT_SELECT_CLAUSE},
+            {detailed_select_clause},
             '{schema}' as schema_name,
             '{protocol_slug}' as protocol_slug,
             COALESCE(
@@ -374,6 +391,25 @@ mod tests {
         };
         gen_sql_select_domains_by_address(&protocol, None, true, resolved_to, owned_by)
             .to_string(PostgresQueryBuilder)
+    }
+
+    #[test]
+    fn expiry_past_year_9999_is_reported_as_never() {
+        for clause in [
+            detailed_domain_default_select_clause(),
+            domain_default_select_clause(),
+        ] {
+            assert!(
+                clause.contains(
+                    "CASE WHEN expiry_date >= 253402300799 THEN NULL ELSE to_timestamp(expiry_date) END as expiry_date"
+                ),
+                "{clause}"
+            );
+            assert!(
+                clause.contains("COALESCE(expiry_date < 253402300799 AND to_timestamp(expiry_date) < now(), false) AS is_expired"),
+                "{clause}"
+            );
+        }
     }
 
     #[test]
