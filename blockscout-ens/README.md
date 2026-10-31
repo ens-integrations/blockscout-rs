@@ -12,7 +12,7 @@ Service is **multi-chain**, meaning that only one instance of `graph-node`, `pos
 
 | Subgraph Name       | Network   | TLD   | Note |
 |---------------------|-----------|-------|------|
-| ens-subgraph        | Ethereum  | .eth  |      |
+| ens-subgraph        | Ethereum  | .eth  | ENSv1 + ENSv2, see [ENSv2](#ensv2) |
 | rns-subgraph        | Rootstock | .rsk  |      |
 | genome-subgraph     | Gnosis    | .gno  | SpaceID contracts |
 | bns-subgraph        | Base      | .base |      |
@@ -23,6 +23,54 @@ Service is **multi-chain**, meaning that only one instance of `graph-node`, `pos
 | story-subgraph      | Story     | .ip   | SpaceID contracts |
 | gravity-subgraph    | Gravity   | .g    | SpaceID contracts |
 | zeta-subgraph       | Zeta      | .zeta | SpaceID contracts |
+
+## ENSv2
+
+`ens-subgraph` is [ensdomains/ens-subgraph](https://github.com/ensdomains/ens-subgraph)
+`v2.1.0` with Blockscout's extension fields (see its
+[README](./graph-node/subgraphs/ens-subgraph/README.md)). It indexes ENSv1 and
+ENSv2 on mainnet and Sepolia and projects ENSv2 names into the legacy `Domain`
+tables, so BENS keeps working on the same schema. Three things are specific
+to it:
+
+- **Graph Node `v0.45.0`+** is required (`graph-node/docker-compose.yml`): the
+  manifest is `specVersion 1.3.0` with `indexerHints`, which `v0.34.x` rejects.
+- **ENSIP-19 default primary names.** The ENSv2 app sets a primary name on the
+  `DefaultReverseRegistrar` instead of the v1 `addr.reverse` resolver. The
+  subgraph indexes them as `ENSv2PrimaryName`, with a Blockscout extension
+  field `reverse_node = namehash(<addr>.addr.reverse)`. When a protocol has
+  `specific.ensv2` configured, BENS's `addr_reverse_names` view UNIONs that
+  table with the v1 `name_changed` source, newest record per reverse node.
+- **Migrated names.** The ENSv1 -> ENSv2 migration parks the v1 registry
+  owner in the Graveyard (or a migration controller), and the subgraph keeps
+  `Domain.owner` as that v1 registry owner. With
+  `specific.ensv2.migration_contracts` listing those contracts, BENS reports
+  the name's holder as `owner` instead (the wrapped owner, the registrant, or
+  the owner of the ENSv2 name slot for migrated subnames), lists the name
+  under its holder's address, and does not link the retired NameWrapper
+  token. The raw registry owner stays available to the code as
+  `registry_owner`. Protocols without `ensv2` are unaffected and never touch
+  the ENSv2 tables.
+
+```json
+"specific": {
+  "type": "ens_like",
+  "native_token_contract": "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85",
+  "registry_contract": "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e",
+  "try_offchain_resolve": true,
+  "ensv2": {
+    "migration_contracts": [
+      "0xda021a2c1c2f99574d861ef8c6fa745851beb7f6",
+      "0x3cea18620883a69ed349b23328a3b6302598e51a",
+      "0xab821ca676cf2e0790fa273526a165cfa86aeb64"
+    ]
+  }
+}
+```
+
+Mainnet: Graveyard `0xda02…b7f6`, LockedMigrationController `0x3cea…e51a`,
+UnlockedMigrationController `0xab82…eb64`. Sepolia: `0xb58a…b04d`,
+`0x6029…c3A8`, `0x2a35…64A2` (see `bens-server/config/dev.json`).
 
 ## Envs
 
